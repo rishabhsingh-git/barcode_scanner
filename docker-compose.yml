@@ -1,0 +1,91 @@
+services:
+  # ── Redis ─────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: barocode-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy noeviction
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── NestJS API Server ─────────────────────────────────────────────────
+  server:
+    build:
+      context: ./apps/server
+      dockerfile: Dockerfile
+    container_name: barocode-server
+    ports:
+      - "${SERVER_PORT:-3001}:3001"
+    environment:
+      - SERVER_PORT=3001
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - UPLOAD_PATH=/app/storage
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - OPENAI_MAX_CONCURRENT=${OPENAI_MAX_CONCURRENT:-5}
+      - OPENAI_RPM_LIMIT=${OPENAI_RPM_LIMIT:-50}
+      - OPENAI_MAX_RETRIES=${OPENAI_MAX_RETRIES:-3}
+      - OPENAI_CHUNK_SIZE=${OPENAI_CHUNK_SIZE:-10}
+      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/app/vision-key.json}
+    volumes:
+      - storage_data:/app/storage
+      - ./vision-key.json:/app/vision-key.json:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── BullMQ Image Processing Worker ────────────────────────────────────
+  worker:
+    build:
+      context: ./apps/server
+      dockerfile: Dockerfile
+    container_name: barocode-worker
+    command: ["node", "dist/src/workers/image.worker.js"]
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MAX_WORKER_CONCURRENCY=${MAX_WORKER_CONCURRENCY:-10}
+      - UPLOAD_PATH=/app/storage
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - OPENAI_MAX_CONCURRENT=${OPENAI_MAX_CONCURRENT:-5}
+      - OPENAI_RPM_LIMIT=${OPENAI_RPM_LIMIT:-50}
+      - OPENAI_MAX_RETRIES=${OPENAI_MAX_RETRIES:-3}
+      - OPENAI_CHUNK_SIZE=${OPENAI_CHUNK_SIZE:-10}
+      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/app/vision-key.json}
+    volumes:
+      - storage_data:/app/storage
+      - ./vision-key.json:/app/vision-key.json:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      server:
+        condition: service_started
+    restart: unless-stopped
+
+  # ── React Frontend (nginx) ───────────────────────────────────────────
+  client:
+    build:
+      context: ./apps/client
+      dockerfile: Dockerfile
+    container_name: barocode-client
+    ports:
+      - "5173:80"
+    depends_on:
+      - server
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+    driver: local
+  storage_data:
+    driver: local

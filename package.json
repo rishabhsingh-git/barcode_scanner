@@ -1,0 +1,25 @@
+{
+  "name": "barocode-master",
+  "version": "1.0.0",
+  "private": true,
+  "description": "High-performance barcode image processing system",
+  "scripts": {
+    "install:all": "cd apps/server && npm install && cd ../client && npm install",
+    "dev:server": "cd apps/server && npm run start:dev",
+    "dev:worker": "cd apps/server && npm run worker",
+    "dev:client": "cd apps/client && npm run dev",
+    "build:server": "cd apps/server && npm run build",
+    "build:client": "cd apps/client && npm run build"
+  },
+  "dependencies": {
+    "@google-cloud/vision": "^5.3.4",
+    "dotenv": "^17.3.1",
+    "dynamsoft-barcode-reader": "^10.4.31",
+    "dynamsoft-barcode-reader-bundle": "^11.2.4000",
+    "dynamsoft-capture-vision-router": "^2.4.33",
+    "dynamsoft-core": "^3.4.31",
+    "express": "^5.2.1",
+    "multer": "^2.1.1",
+    "sharp": "^0.34.5"
+  }
+}

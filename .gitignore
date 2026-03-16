@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+storage/
+*.log
+.DS_Store
+vision-key.json
+
