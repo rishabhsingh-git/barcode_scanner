@@ -43,9 +43,33 @@ export class QueueService {
       redisClient.get(REDIS_FAILED_IMAGES_KEY),
     ]);
 
-    const totalImages = totalStr ? parseInt(totalStr, 10) : 0;
-    const processedImages = processedStr ? parseInt(processedStr, 10) : 0;
-    const failedImages = failedStr ? parseInt(failedStr, 10) : 0;
+    let totalImages = totalStr ? parseInt(totalStr, 10) : 0;
+    let processedImages = processedStr ? parseInt(processedStr, 10) : 0;
+    let failedImages = failedStr ? parseInt(failedStr, 10) : 0;
+
+    // Fallback: if Redis counters are missing/zero but files exist on disk,
+    // derive counts from storage directories so downloads don't stay disabled.
+    const countFiles = async (dirPath: string): Promise<number> => {
+      try {
+        const files = await fs.promises.readdir(dirPath);
+        return files.filter((f) => !f.startsWith('.')).length;
+      } catch {
+        return 0;
+      }
+    };
+
+    if (totalImages === 0 || (processedImages === 0 && failedImages === 0)) {
+      const [processedOnDisk, failedOnDisk] = await Promise.all([
+        countFiles(STORAGE_PROCESSED),
+        countFiles(STORAGE_FAILED),
+      ]);
+
+      if (processedOnDisk > 0 || failedOnDisk > 0) {
+        processedImages = Math.max(processedImages, processedOnDisk);
+        failedImages = Math.max(failedImages, failedOnDisk);
+        totalImages = Math.max(totalImages, processedImages + failedImages);
+      }
+    }
     const pendingImages = totalImages - processedImages - failedImages;
 
     // Calculate progress percentage (avoid division by zero)

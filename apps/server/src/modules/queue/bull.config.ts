@@ -14,7 +14,9 @@ export const bullConfig = {
 
 export const workerConfig = {
   /** Number of concurrent image processing jobs */
-  concurrency: parseInt(process.env.MAX_WORKER_CONCURRENCY || '20', 10),
+  // Default lowered to avoid CPU/Disk saturation (Python + Vision + FS I/O are heavy).
+  // Override with MAX_WORKER_CONCURRENCY env if you have more CPU/IO headroom.
+  concurrency: parseInt(process.env.MAX_WORKER_CONCURRENCY || '3', 10),
 
   /** Retry settings for failed jobs */
   attempts: 3,

@@ -338,6 +338,50 @@ export async function uploadImagesWithCrops(
 }
 
 /**
+ * Upload a SINGLE image with its manually cropped barcode region and enqueue it for processing.
+ *
+ * This is used by the new crop UI flow: user crops one image, clicks Save,
+ * and we immediately start the background barcode processing for that one image.
+ */
+export async function uploadSingleImageWithCrop(
+  file: File,
+  crop: Blob,
+  onProgress?: (percent: number) => void,
+): Promise<UploadResponse> {
+  const formData = new FormData();
+
+  formData.append('originals', file);
+  const cropFile = new File([crop], `crop-${Date.now()}.jpg`, { type: 'image/jpeg' });
+  formData.append('crops', cropFile);
+  formData.append(
+    'mapping',
+    JSON.stringify([
+      {
+        originalIndex: 0,
+        originalName: file.name,
+        cropIndex: 0,
+      },
+    ]),
+  );
+
+  const { data } = await api.post<UploadResponse>('/upload/with-crops', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 1800000,
+    maxContentLength: 2 * 1024 * 1024 * 1024,
+    maxBodyLength: 2 * 1024 * 1024 * 1024,
+    onUploadProgress: (event) => {
+      if (event.loaded && onProgress) {
+        const total = event.total || file.size;
+        onProgress(Math.min(99, Math.round((event.loaded / total) * 100)));
+      }
+    },
+  });
+
+  onProgress?.(100);
+  return data;
+}
+
+/**
  * Fetch current processing progress from the server.
  * Called by React Query every 2 seconds.
  */
@@ -411,6 +455,86 @@ export async function downloadZip(): Promise<void> {
       throw new Error('Download timeout: The ZIP file is too large. Please try again or contact support.');
     }
     
+    throw error;
+  }
+}
+
+/**
+ * Download ORIGINAL uploaded images as a ZIP file.
+ */
+export async function downloadOriginalZip(): Promise<void> {
+  try {
+    console.log('[Download] Starting ORIGINAL ZIP download...');
+
+    const response = await api.get('/download/original-zip', {
+      responseType: 'blob',
+      timeout: 600000, // 10 min
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+    });
+
+    if (!(response.data instanceof Blob)) {
+      throw new Error('Response is not a blob');
+    }
+
+    const url = window.URL.createObjectURL(response.data);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', 'original-images.zip');
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+
+    setTimeout(() => {
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+      console.log('[Download] ORIGINAL ZIP download triggered successfully');
+    }, 100);
+  } catch (error: any) {
+    console.error('[Download] ORIGINAL ZIP download failed:', error);
+    if (error.code === 'ECONNABORTED') {
+      throw new Error('Download timeout: The ZIP file is too large. Please try again.');
+    }
+    throw error;
+  }
+}
+
+/**
+ * Download FAILED images (barcode detection failed) as a ZIP file.
+ */
+export async function downloadFailedZip(): Promise<void> {
+  try {
+    console.log('[Download] Starting FAILED ZIP download...');
+
+    const response = await api.get('/download/failed-zip', {
+      responseType: 'blob',
+      timeout: 600000, // 10 min
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+    });
+
+    if (!(response.data instanceof Blob)) {
+      throw new Error('Response is not a blob');
+    }
+
+    const url = window.URL.createObjectURL(response.data);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', 'failed-images.zip');
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+
+    setTimeout(() => {
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+      console.log('[Download] FAILED ZIP download triggered successfully');
+    }, 100);
+  } catch (error: any) {
+    console.error('[Download] FAILED ZIP download failed:', error);
+    if (error.code === 'ECONNABORTED') {
+      throw new Error('Download timeout: The ZIP file is too large. Please try again.');
+    }
     throw error;
   }
 }

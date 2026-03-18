@@ -1,7 +1,13 @@
 import { useState, useCallback } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { uploadImages, uploadImagesWithCrops, resetProgress, type UploadResponse } from '../services/api';
+import {
+  uploadImages,
+  uploadImagesWithCrops,
+  uploadSingleImageWithCrop,
+  resetProgress,
+  type UploadResponse,
+} from '../services/api';
 
 /**
  * useUpload Hook
@@ -21,7 +27,7 @@ export function useUpload() {
   const mutation = useMutation<
     UploadResponse,
     Error,
-    { files: File[]; crops?: Map<number, Blob> }
+    { files: File[]; crops?: Map<number, Blob>; singleCrop?: Blob }
   >({
     mutationFn: async ({ files, crops }) => {
       setUploadProgress(0);
@@ -73,8 +79,28 @@ export function useUpload() {
     [mutation],
   );
 
+  /**
+   * Upload ONE image with ONE crop.
+   * Does NOT reset progress automatically; the crop UI owns when to reset for a new batch.
+   */
+  const uploadOneWithCrop = useCallback(
+    async (file: File, crop: Blob, onProgress?: (percent: number) => void) => {
+      // Keep local progress state in sync if caller doesn't provide one
+      const handleProgress = (p: number) => {
+        setUploadProgress(p);
+        onProgress?.(p);
+      };
+
+      const result = await uploadSingleImageWithCrop(file, crop, handleProgress);
+      queryClient.invalidateQueries({ queryKey: ['jobProgress'] });
+      return result;
+    },
+    [queryClient],
+  );
+
   return {
     upload,
+    uploadOneWithCrop,
     uploadProgress,
     isUploading: mutation.isPending,
     isSuccess: mutation.isSuccess,

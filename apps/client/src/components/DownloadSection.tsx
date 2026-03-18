@@ -1,10 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Download, Archive, Loader2, CheckCircle2 } from 'lucide-react';
+import { Download, Archive, Loader2, CheckCircle2, Image as ImageIcon, AlertTriangle, RotateCcw } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from './ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
-import { downloadZip, type JobProgress } from '../services/api';
+import { downloadFailedZip, downloadOriginalZip, downloadZip, resetProgress, type JobProgress } from '../services/api';
 
 interface DownloadSectionProps {
   progress: JobProgress | undefined;
@@ -18,11 +18,46 @@ interface DownloadSectionProps {
  */
 export function DownloadSection({ progress }: DownloadSectionProps) {
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isDownloadingOriginal, setIsDownloadingOriginal] = useState(false);
+  const [isDownloadingFailed, setIsDownloadingFailed] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
   const [downloadComplete, setDownloadComplete] = useState(false);
+  const [originalDownloadComplete, setOriginalDownloadComplete] = useState(false);
+  const [failedDownloadComplete, setFailedDownloadComplete] = useState(false);
 
   const hasProcessedImages = (progress?.processedImages ?? 0) > 0;
+  const hasFailedImages = (progress?.failedImages ?? 0) > 0;
   const isComplete = progress?.progressPercentage === 100 && (progress?.totalImages ?? 0) > 0;
   const canDownload = hasProcessedImages && !isDownloading;
+  const canDownloadOriginal = isComplete && !isDownloadingOriginal;
+  const canDownloadFailed = hasFailedImages && !isDownloadingFailed;
+
+  // Reset "Downloaded" states when a new batch starts or progress changes significantly
+  useEffect(() => {
+    setDownloadComplete(false);
+    setOriginalDownloadComplete(false);
+    setFailedDownloadComplete(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [progress?.totalImages]);
+
+  const handleReset = async () => {
+    try {
+      setIsResetting(true);
+      toast.info('Resetting batch & progress...');
+      await resetProgress();
+      setDownloadComplete(false);
+      setOriginalDownloadComplete(false);
+      setFailedDownloadComplete(false);
+      // Notify other components (UploadPanel/Cropper) to clear any selected files/UI state
+      window.dispatchEvent(new CustomEvent('barocode:reset'));
+      toast.success('Reset complete');
+    } catch (e) {
+      console.error('Reset error:', e);
+      toast.error('Failed to reset. Please try again.');
+    } finally {
+      setIsResetting(false);
+    }
+  };
 
   const handleDownload = async () => {
     try {
@@ -34,11 +69,50 @@ export function DownloadSection({ progress }: DownloadSectionProps) {
 
       setDownloadComplete(true);
       toast.success('Download ready!');
+      setTimeout(() => setDownloadComplete(false), 3000);
     } catch (error) {
       toast.error('Failed to download ZIP. Please try again.');
       console.error('Download error:', error);
     } finally {
       setIsDownloading(false);
+    }
+  };
+
+  const handleDownloadOriginal = async () => {
+    try {
+      setIsDownloadingOriginal(true);
+      setOriginalDownloadComplete(false);
+      toast.info('Preparing original images ZIP...');
+
+      await downloadOriginalZip();
+
+      setOriginalDownloadComplete(true);
+      toast.success('Original ZIP download ready!');
+      setTimeout(() => setOriginalDownloadComplete(false), 3000);
+    } catch (error) {
+      toast.error('Failed to download original ZIP. Please try again.');
+      console.error('Original ZIP download error:', error);
+    } finally {
+      setIsDownloadingOriginal(false);
+    }
+  };
+
+  const handleDownloadFailed = async () => {
+    try {
+      setIsDownloadingFailed(true);
+      setFailedDownloadComplete(false);
+      toast.info('Preparing failed images ZIP...');
+
+      await downloadFailedZip();
+
+      setFailedDownloadComplete(true);
+      toast.success('Failed images ZIP download ready!');
+      setTimeout(() => setFailedDownloadComplete(false), 3000);
+    } catch (error) {
+      toast.error('Failed to download failed-images ZIP. Please try again.');
+      console.error('Failed ZIP download error:', error);
+    } finally {
+      setIsDownloadingFailed(false);
     }
   };
 
@@ -69,6 +143,29 @@ export function DownloadSection({ progress }: DownloadSectionProps) {
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
+        {/* Reset */}
+        <div className="flex justify-end">
+          <Button
+            variant="outline"
+            onClick={handleReset}
+            disabled={isResetting}
+            className="h-9"
+            title="Clear queue, progress counters, and storage for a fresh batch"
+          >
+            {isResetting ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Resetting...
+              </>
+            ) : (
+              <>
+                <RotateCcw className="mr-2 h-4 w-4" />
+                Reset
+              </>
+            )}
+          </Button>
+        </div>
+
         {/* Status message */}
         <div className="rounded-lg bg-white/5 px-4 py-3">
           <AnimatePresence mode="wait">
@@ -138,6 +235,58 @@ export function DownloadSection({ progress }: DownloadSectionProps) {
             <>
               <Download className="mr-2 h-5 w-5" />
               Download Processed Images (ZIP)
+            </>
+          )}
+        </Button>
+
+        {/* Original ZIP download (available after completion) */}
+        <Button
+          variant={isComplete ? 'secondary' : 'secondary'}
+          size="lg"
+          className="w-full"
+          onClick={handleDownloadOriginal}
+          disabled={!canDownloadOriginal}
+        >
+          {isDownloadingOriginal ? (
+            <>
+              <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+              Preparing original ZIP...
+            </>
+          ) : originalDownloadComplete ? (
+            <>
+              <CheckCircle2 className="mr-2 h-5 w-5" />
+              Original ZIP downloaded!
+            </>
+          ) : (
+            <>
+              <ImageIcon className="mr-2 h-5 w-5" />
+              Download Original Images (ZIP)
+            </>
+          )}
+        </Button>
+
+        {/* Failed ZIP download (available when failures exist) */}
+        <Button
+          variant={hasFailedImages ? 'secondary' : 'secondary'}
+          size="lg"
+          className="w-full"
+          onClick={handleDownloadFailed}
+          disabled={!canDownloadFailed}
+        >
+          {isDownloadingFailed ? (
+            <>
+              <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+              Preparing failed ZIP...
+            </>
+          ) : failedDownloadComplete ? (
+            <>
+              <CheckCircle2 className="mr-2 h-5 w-5" />
+              Failed ZIP downloaded!
+            </>
+          ) : (
+            <>
+              <AlertTriangle className="mr-2 h-5 w-5" />
+              Download Failed Images (ZIP)
             </>
           )}
         </Button>

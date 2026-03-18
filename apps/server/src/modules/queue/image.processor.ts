@@ -14,6 +14,44 @@ import {
 import * as childProcess from 'child_process';
 import { promisify } from 'util';
 const execFile = promisify(childProcess.execFile);
+import sharp from 'sharp';
+
+async function moveFile(src: string, dest: string): Promise<void> {
+  // Prefer atomic rename (fast, no copy). Fallback to copy+unlink if cross-device.
+  try {
+    await fs.promises.rename(src, dest);
+  } catch (err: any) {
+    if (err?.code === 'EXDEV') {
+      await fs.promises.copyFile(src, dest);
+      await fs.promises.unlink(src).catch(() => {});
+      return;
+    }
+    throw err;
+  }
+}
+
+// Reuse a single GoogleVisionClient instance per worker process to avoid repeated
+// initialization/logging overhead on every image.
+let googleVisionSingleton: (import('../../common/google-vision-client').GoogleVisionClient) | null = null;
+async function getGoogleVisionClient() {
+  if (googleVisionSingleton) return googleVisionSingleton;
+  const { GoogleVisionClient } = await import('../../common/google-vision-client');
+  googleVisionSingleton = new GoogleVisionClient();
+  return googleVisionSingleton;
+}
+
+/**
+ * Warm up Google Vision client at worker startup so the first job doesn't pay
+ * initialization overhead (credentials read + client init).
+ */
+export async function warmupGoogleVisionClient(): Promise<void> {
+  try {
+    const gv = await getGoogleVisionClient();
+    await gv.isAvailable(); // triggers initialize()
+  } catch {
+    // ignore warmup failures; processing will fall back to runtime init/handling
+  }
+}
 
 /**
  * Image Processor — Dynamic Barcode Localization for 100% Accuracy
@@ -133,7 +171,22 @@ export async function processImage(
     try {
       const scriptPath = '/app/scripts/detect_barcode.py';
       console.log(`  [Processor] 📍 Calling detect_barcode.py to detect and crop barcode area...`);
-      const { stdout, stderr } = await execFile('python3', [scriptPath, filePath, '--crop-only']);
+      // Downscale BEFORE Python to avoid reading huge originals (biggest speed win)
+      const resizedPath = path.join(
+        path.dirname(filePath),
+        `${path.basename(filePath, extension)}__resized${extension || '.jpg'}`,
+      );
+      console.time('  [Processor] sharp.resize');
+      await sharp(filePath)
+        .rotate() // respect EXIF orientation
+        .resize({ width: 2000, withoutEnlargement: true })
+        .jpeg({ quality: 85 })
+        .toFile(resizedPath);
+      console.timeEnd('  [Processor] sharp.resize');
+
+      console.time('  [Processor] python.detect_barcode');
+      const { stdout, stderr } = await execFile('python3', [scriptPath, resizedPath, '--crop-only']);
+      console.timeEnd('  [Processor] python.detect_barcode');
       const output = stdout.trim();
       
       if (output && fs.existsSync(output)) {
@@ -149,6 +202,9 @@ export async function processImage(
       if (stderr) {
         console.log(`  [Processor] Python stderr: ${stderr}`);
       }
+
+      // Cleanup resized temp file
+      await fs.promises.unlink(resizedPath).catch(() => {});
     } catch (error: any) {
       console.log(`  [Processor] ⚠ Barcode detection/cropping failed: ${error.message}`);
       if (error.stdout) console.log(`  [Processor] Python stdout: ${error.stdout}`);
@@ -205,15 +261,7 @@ export async function processImage(
     // For auto-crops, allow 2 retries in case of detection issues
     const maxRetries = hasManualCrop ? 1 : 2;
     
-    // Import GoogleVisionClient once (not on every retry)
-    const importStartTime = Date.now();
-    const { GoogleVisionClient } = await import('../../common/google-vision-client');
-    const importTime = Date.now() - importStartTime;
-    if (importTime > 50) {
-      console.log(`  [Processor] ⚠ Import took ${importTime}ms (should be < 50ms)`);
-    }
-    
-    const googleVision = new GoogleVisionClient();
+    const googleVision = await getGoogleVisionClient();
     
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
@@ -299,33 +347,40 @@ export async function processImage(
       console.log(`  [Processor]    Crop file exists: ${cropFilePath ? fs.existsSync(cropFilePath) : 'N/A'}`);
       throw new Error(`Manual crop file was provided but could not be used: ${cropFilePath}`);
     }
-    console.log(`  [Processor] Cropping failed, trying Google Vision on full image...`);
-    console.log(`  [Processor] ⚠ WARNING: Using full image (${(fs.statSync(filePath).size / (1024 * 1024)).toFixed(2)} MB) - may exceed Google Vision API limit!`);
+    const fullSizeMB = (fs.statSync(filePath).size / (1024 * 1024)).toFixed(2);
+    console.log(`  [Processor] Cropping failed, considering Google Vision on full image...`);
+    console.log(`  [Processor] ⚠ Full image size: ${fullSizeMB} MB`);
+    // HARD GUARD: Never send huge originals to Vision (slow + expensive + unreliable).
+    // If this triggers, treat as failure and move to failed bucket.
+    if (fs.statSync(filePath).size > 20 * 1024 * 1024) {
+      console.log(`  [Processor] ❌ Skipping full-image Vision fallback (image > 20MB). Marking as failed.`);
+      barcodeValue = null;
+    } else {
     
-    const maxRetries = 2;
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        const { GoogleVisionClient } = await import('../../common/google-vision-client');
-        const googleVision = new GoogleVisionClient();
-        const googleResult = await googleVision.detectBarcode(filePath);
-        
-        if (googleResult) {
-          if (validateBarcode(googleResult)) {
-            barcodeValue = googleResult;
-            console.log(`  [Processor] ✅ Google Vision SUCCESS (full image): ${barcodeValue}`);
-            console.log(`  [Processor]    Length: ${barcodeValue.length} digits`);
-            console.log(`  [Processor]    ✅ Checksum validation: PASSED`);
-            break;
-          } else {
-            console.log(`  [Processor] ⚠ Result failed checksum validation: ${googleResult}`);
+      const maxRetries = 2;
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          const googleVision = await getGoogleVisionClient();
+          const googleResult = await googleVision.detectBarcode(filePath);
+          
+          if (googleResult) {
+            if (validateBarcode(googleResult)) {
+              barcodeValue = googleResult;
+              console.log(`  [Processor] ✅ Google Vision SUCCESS (full image): ${barcodeValue}`);
+              console.log(`  [Processor]    Length: ${barcodeValue.length} digits`);
+              console.log(`  [Processor]    ✅ Checksum validation: PASSED`);
+              break;
+            } else {
+              console.log(`  [Processor] ⚠ Result failed checksum validation: ${googleResult}`);
+            }
           }
+        } catch (error: any) {
+          console.log(`  [Processor] ❌ Google Vision ERROR: ${error.message}`);
         }
-      } catch (error: any) {
-        console.log(`  [Processor] ❌ Google Vision ERROR: ${error.message}`);
-      }
-      
-      if (attempt < maxRetries) {
-        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        if (attempt < maxRetries) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
       }
     }
   }
@@ -342,8 +397,9 @@ export async function processImage(
 
     // Move to failed directory
     const failedPath = path.join(STORAGE_FAILED, path.basename(filePath));
-    await fs.promises.copyFile(filePath, failedPath);
-    await fs.promises.unlink(filePath).catch(() => {});
+    console.time('  [Processor] move.failed');
+    await moveFile(filePath, failedPath);
+    console.timeEnd('  [Processor] move.failed');
     
     console.log(`  [Processor] File moved to: ${failedPath}`);
     console.log('═══════════════════════════════════════════════════════════');
@@ -362,12 +418,19 @@ export async function processImage(
   const outputFilename = `${sanitized}${extension}`;
   let outputPath = path.join(STORAGE_PROCESSED, outputFilename);
 
-  // Handle duplicate filenames
+  // IMPORTANT: Never create "junk" timestamp suffixes.
+  // If the target barcode filename already exists, we overwrite it.
+  // This prevents names like BARCODE_1234567890.ext.
+  //
+  // Note: If two different images truly share the same barcode, overwriting is inevitable
+  // when the requirement is "barcode only" filenames.
   if (fs.existsSync(outputPath)) {
-    console.log(`  [Processor] ⚠ Output file already exists, adding timestamp...`);
-    const timestampedFilename = `${sanitized}_${Date.now()}${extension}`;
-    outputPath = path.join(STORAGE_PROCESSED, timestampedFilename);
-    console.log(`  [Processor] New filename: ${timestampedFilename}`);
+    console.log(`  [Processor] ⚠ Output file already exists for barcode ${sanitized}. Overwriting to avoid suffixes.`);
+    try {
+      await fs.promises.unlink(outputPath);
+    } catch {
+      // ignore
+    }
   }
 
   // ── Step 5: Save original full image with new name ────────────────────────
@@ -378,11 +441,12 @@ export async function processImage(
   console.log(`  [Processor]    Full path: ${outputPath}`);
   
   const copyStartTime = Date.now();
-  await fs.promises.copyFile(filePath, outputPath);
+  // Fast path: rename instead of copy (no double I/O)
+  console.time('  [Processor] move.processed');
+  await moveFile(filePath, outputPath);
+  console.timeEnd('  [Processor] move.processed');
   const copyTime = Date.now() - copyStartTime;
-  console.log(`  [Processor] ✓ File copied in ${copyTime}ms`);
-  
-  await fs.promises.unlink(filePath).catch(() => {});
+  console.log(`  [Processor] ✓ File moved in ${copyTime}ms`);
 
   const processingTimeMs = Date.now() - startTime;
   console.log('');

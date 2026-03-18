@@ -22,7 +22,7 @@ import * as path from 'path';
 import { Worker, Job } from 'bullmq';
 import Redis from 'ioredis';
 import { bullConfig, workerConfig } from '../modules/queue/bull.config';
-import { processImage } from '../modules/queue/image.processor';
+import { processImage, warmupGoogleVisionClient } from '../modules/queue/image.processor';
 // OpenAI code kept aside - not used but available
 // import { openaiConfig } from '../common/openai-client';
 import {
@@ -174,3 +174,10 @@ process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
 console.log('🚀 Worker started. Waiting for jobs...\n');
+
+// Warm up Google Vision at startup to reduce latency for the first processed image
+warmupGoogleVisionClient().then(() => {
+  console.log('✅ Google Vision warmup complete');
+}).catch(() => {
+  // ignore
+});

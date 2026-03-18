@@ -194,9 +194,16 @@ export class GoogleVisionClient {
             console.log(`    - Cleaned (digits only): ${cleaned}`);
             console.log(`    - Length: ${cleaned.length} digits`);
             
-            // STRICT VALIDATION: Most barcodes are 8-21 digits
-            // Reject longer sequences (likely filenames or concatenated text)
-            if (cleaned.length >= 8 && cleaned.length <= 21) {
+            // STRICT VALIDATION:
+            // Accept known barcode lengths for this product domain (including 21-digit codes),
+            // while still rejecting longer "junk" OCR strings.
+            // - EAN-13: 13 digits (checksum)
+            // - UPC-A:  12 digits (checksum)
+            // - EAN-8:   8 digits
+            // - ITF-14: 14 digits
+            // - Custom: 21 digits (per customer barcode standard)
+            const allowedLengths = new Set([8, 12, 13, 14, 21]);
+            if (allowedLengths.has(cleaned.length)) {
               // Additional validation: EAN-13/UPC-A checksum
               let isValidChecksum = true;
               if (cleaned.length === 13 || cleaned.length === 12) {
@@ -236,7 +243,9 @@ export class GoogleVisionClient {
                 console.log(`    - ⚠ Barcode failed checksum validation - likely misread`);
               }
             } else {
-              console.log(`    - ⚠ Invalid length (need 8-21 digits, got ${cleaned.length}) - likely filename or other text`);
+              console.log(
+                `    - ⚠ Invalid length (allowed: 8/12/13/14/21, got ${cleaned.length}) - likely junk text`,
+              );
             }
           }
         }
@@ -290,20 +299,28 @@ export class GoogleVisionClient {
             }
             
             // STRICT FILTERING:
-            // 1. Must be reasonable barcode length (8-21 digits)
-            // 2. Must NOT be too long (reject filenames which are usually 20+ digits)
-            // 3. Prefer sequences that are in the middle-lower part of image (where numbers below barcode are)
+            // Only accept common barcode lengths to avoid long junk numbers.
             
-            if (cleaned.length >= 8 && cleaned.length <= 21) {
+            const allowedLengths = new Set([8, 12, 13, 14, 21]);
+            if (allowedLengths.has(cleaned.length)) {
               // Additional validation: Check if it looks like a barcode number
               // Barcode numbers are usually continuous digits without excessive length
               // Filenames often have patterns like "4502466420355752611000005" (25+ digits)
               
-              // Reject if it's suspiciously long or contains patterns that suggest filename
-              const isLikelyFilename = cleaned.length > 22 || 
-                                       (cleaned.length > 20 && cleaned.startsWith('4') && cleaned[1] === '5');
-              
-              if (!isLikelyFilename) {
+              // For 12/13 digits, require checksum validation
+              let isValidChecksum = true;
+              if (cleaned.length === 13 || cleaned.length === 12) {
+                const digits = cleaned.split('').map(Number);
+                const checksum = digits[digits.length - 1];
+                let total = 0;
+                for (let i = 0; i < digits.length - 1; i++) {
+                  total += digits[i] * (i % 2 === 0 ? 1 : 3);
+                }
+                const calculatedChecksum = (10 - (total % 10)) % 10;
+                isValidChecksum = calculatedChecksum === checksum;
+              }
+
+              if (isValidChecksum) {
                 candidateNumbers.push({ 
                   text, 
                   cleaned, 
@@ -318,11 +335,11 @@ export class GoogleVisionClient {
                 }
               } else {
                 console.log(`  [Google Vision] Text ${i + 1}: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`);
-                console.log(`    - ⚠ Rejected: Likely filename or header text (length: ${cleaned.length}, pattern detected)`);
+                console.log(`    - ⚠ Rejected: checksum failed for ${cleaned.length}-digit code`);
               }
             } else if (cleaned.length > 0) {
               console.log(`  [Google Vision] Text ${i + 1}: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`);
-              console.log(`    - ⚠ Rejected: length ${cleaned.length} not in range 8-21 (likely filename or other text)`);
+              console.log(`    - ⚠ Rejected: length ${cleaned.length} not in allowed 8/12/13/14/21`);
             }
           }
         }

@@ -67,5 +67,86 @@ export class ZipController {
       this.logger.log(`ZIP download completed (${fileCount} files)`);
     });
   }
+
+  /**
+   * GET /download/original-zip — Streams a ZIP archive of all ORIGINAL uploaded images.
+   */
+  @Get('original-zip')
+  async downloadOriginalZip(@Res() res: Response) {
+    this.logger.log('Original ZIP download requested');
+
+    const fileCount = await this.zipService.getOriginalFileCount();
+
+    if (fileCount === 0) {
+      throw new HttpException('No original images available for download', HttpStatus.NOT_FOUND);
+    }
+
+    this.logger.log(`Streaming ORIGINAL ZIP archive with ${fileCount} file(s)`);
+
+    res.set({
+      'Content-Type': 'application/zip',
+      'Content-Disposition': 'attachment; filename="original-images.zip"',
+      'Transfer-Encoding': 'chunked',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+      'Cache-Control': 'no-cache',
+    });
+
+    const archive = this.zipService.createOriginalZipStream();
+
+    archive.on('error', (err) => {
+      this.logger.error(`Original ZIP archive error: ${err.message}`);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to create original ZIP archive' });
+      }
+    });
+
+    archive.pipe(res);
+
+    archive.on('end', () => {
+      this.logger.log(`Original ZIP download completed (${fileCount} files)`);
+    });
+  }
+
+  /**
+   * GET /download/failed-zip — Streams a ZIP archive of all FAILED images.
+   */
+  @Get('failed-zip')
+  async downloadFailedZip(@Res() res: Response) {
+    this.logger.log('Failed ZIP download requested');
+
+    const fileCount = await this.zipService.getFailedFileCount();
+    if (fileCount === 0) {
+      throw new HttpException('No failed images available for download', HttpStatus.NOT_FOUND);
+    }
+
+    this.logger.log(`Streaming FAILED ZIP archive with ${fileCount} file(s)`);
+
+    res.set({
+      'Content-Type': 'application/zip',
+      'Content-Disposition': 'attachment; filename="failed-images.zip"',
+      'Transfer-Encoding': 'chunked',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+      'Cache-Control': 'no-cache',
+    });
+
+    const archive = this.zipService.createFailedZipStream();
+
+    archive.on('error', (err) => {
+      this.logger.error(`Failed ZIP archive error: ${err.message}`);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to create failed ZIP archive' });
+      }
+    });
+
+    archive.pipe(res);
+
+    archive.on('end', () => {
+      this.logger.log(`Failed ZIP download completed (${fileCount} files)`);
+    });
+  }
 }
 

@@ -1,11 +1,10 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Upload, ImageIcon, X, Loader2, Crop as CropIcon } from 'lucide-react';
+import { Upload, ImageIcon, X, Crop as CropIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from './ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
-import { useUpload } from '../hooks/useUpload';
 import { formatNumber } from '../lib/utils';
 import { BarcodeCropSlider } from './BarcodeCropSlider';
 
@@ -18,8 +17,6 @@ import { BarcodeCropSlider } from './BarcodeCropSlider';
 export function UploadPanel() {
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [showCropSlider, setShowCropSlider] = useState(false);
-  const [cropsMap, setCropsMap] = useState<Map<number, Blob>>(new Map());
-  const { upload, uploadProgress, isUploading, isSuccess, data } = useUpload();
 
 
   const onDrop = useCallback((acceptedFiles: File[], rejectedFiles: any[]) => {
@@ -56,9 +53,10 @@ export function UploadPanel() {
       
       if (acceptedFiles.length > 0) {
         setSelectedFiles(acceptedFiles);
-        setCropsMap(new Map()); // Reset crops when new files selected
         setShowCropSlider(false); // Ensure slider is closed when new files are selected
-        toast.info(`${acceptedFiles.length} image(s) selected${sizeDisplay}. Click "Crop Barcodes" button to crop.`);
+        toast.info(
+          `${acceptedFiles.length} image(s) selected${sizeDisplay}. Open the cropper to save crops per-image.`,
+        );
       }
     } catch (error: any) {
       console.error('[UploadPanel] Error handling file selection:', error);
@@ -69,7 +67,7 @@ export function UploadPanel() {
   const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
     onDrop,
     accept: { 'image/*': ['.jpeg', '.jpg', '.png', '.gif', '.bmp', '.webp', '.tiff'] },
-    disabled: isUploading || showCropSlider, // Disable when crop slider is open
+    disabled: showCropSlider, // Disable when crop slider is open
     maxFiles: 100000, // Support massive batches
     maxSize: 2 * 1024 * 1024 * 1024, // 2GB per file (supports 1GB+ images)
     noClick: false,
@@ -96,49 +94,25 @@ export function UploadPanel() {
     },
   };
 
-  const handleCropComplete = (crops: Map<number, Blob>) => {
-    // Validate all files have crops
-    if (crops.size !== selectedFiles.length) {
-      toast.error(`Please crop all ${selectedFiles.length} images before uploading`);
-      return;
-    }
-    
-    setCropsMap(crops);
-    setShowCropSlider(false);
-    // Automatically trigger upload after cropping
-    if (selectedFiles.length > 0) {
-      handleUpload(selectedFiles, crops);
-    }
-  };
-
   const handleCropCancel = () => {
     setShowCropSlider(false);
-    setSelectedFiles([]);
-    setCropsMap(new Map());
-  };
-
-  const handleUpload = (files?: File[], crops?: Map<number, Blob>) => {
-    const filesToUpload = files || selectedFiles;
-    const cropsToUpload = crops || cropsMap;
-    
-    if (filesToUpload.length === 0) {
-      toast.error('No images selected');
-      return;
-    }
-
-    // If crops are available, use them; otherwise use regular upload
-    if (cropsToUpload.size > 0 && cropsToUpload.size === filesToUpload.length) {
-      toast.info('Upload started with cropped barcodes...');
-      upload(filesToUpload, cropsToUpload);
-    } else {
-      toast.info('Upload started...');
-      upload(filesToUpload);
-    }
   };
 
   const clearFiles = () => {
     setSelectedFiles([]);
+    setShowCropSlider(false);
   };
+
+  // Clear local UI state when user resets the batch from the Download section
+  useEffect(() => {
+    const onReset = () => {
+      clearFiles();
+      toast.info('Selection cleared after reset');
+    };
+    window.addEventListener('barocode:reset', onReset as EventListener);
+    return () => window.removeEventListener('barocode:reset', onReset as EventListener);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <Card className="glass border-white/10">
@@ -161,7 +135,6 @@ export function UploadPanel() {
               ? 'border-neon-cyan bg-neon-cyan/5 neon-glow-cyan'
               : 'border-white/20 hover:border-neon-cyan/50 hover:bg-white/5'
             }
-            ${isUploading ? 'pointer-events-none opacity-50' : ''}
           `}
         >
           <input {...enhancedInputProps} />
@@ -243,19 +216,17 @@ export function UploadPanel() {
                 </div>
                 <div className="flex items-center gap-2">
                 
-                  {!isUploading && (
-                    <button
-                      onClick={(e) => { 
-                        e.stopPropagation(); 
-                        e.preventDefault();
-                        clearFiles(); 
-                      }}
-                      className="rounded-full p-1 hover:bg-white/10 transition-colors"
-                      title="Clear selected files"
-                    >
-                      <X className="h-4 w-4 text-muted-foreground" />
-                    </button>
-                  )}
+                  <button
+                    onClick={(e) => { 
+                      e.stopPropagation(); 
+                      e.preventDefault();
+                      clearFiles(); 
+                    }}
+                    className="rounded-full p-1 hover:bg-white/10 transition-colors"
+                    title="Clear selected files"
+                  >
+                    <X className="h-4 w-4 text-muted-foreground" />
+                  </button>
                 </div>
               </div>
             </motion.div>
@@ -263,31 +234,7 @@ export function UploadPanel() {
         </AnimatePresence>
 
         {/* Upload progress bar */}
-        <AnimatePresence>
-          {isUploading && (
-            <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: 'auto', opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              className="overflow-hidden"
-            >
-              <div className="space-y-2">
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">Uploading...</span>
-                  <span className="text-neon-cyan font-mono">{uploadProgress}%</span>
-                </div>
-                <div className="h-2 rounded-full bg-white/10 overflow-hidden">
-                  <motion.div
-                    className="h-full rounded-full bg-gradient-to-r from-neon-cyan to-neon-purple"
-                    initial={{ width: 0 }}
-                    animate={{ width: `${uploadProgress}%` }}
-                    transition={{ duration: 0.3 }}
-                  />
-                </div>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+        {/* Processing starts per-image when user clicks Save Selection in the cropper */}
 
         {/* Upload button */}
         <Button
@@ -295,37 +242,18 @@ export function UploadPanel() {
           size="lg"
           className="w-full"
           onClick={() => {
-            // If files are selected but not cropped, show crop slider instead
-            if (selectedFiles.length > 0 && cropsMap.size !== selectedFiles.length) {
-              setShowCropSlider(true);
-              toast.info('Please crop all images before uploading');
+            if (selectedFiles.length === 0) {
+              toast.error('No images selected');
               return;
             }
-            handleUpload();
+            setShowCropSlider(true);
           }}
-          disabled={selectedFiles.length === 0 || isUploading || showCropSlider}
+          disabled={selectedFiles.length === 0 || showCropSlider}
         >
-          {isUploading ? (
-            <>
-              <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-              Uploading...
-            </>
-          ) : showCropSlider ? (
-            <>
-              <CropIcon className="mr-2 h-5 w-5" />
-              Crop Images First
-            </>
-          ) : cropsMap.size === selectedFiles.length && selectedFiles.length > 0 ? (
-            <>
-              <Upload className="mr-2 h-5 w-5" />
-              Upload & Process ({cropsMap.size} with crops)
-            </>
-          ) : (
-            <>
-              <Upload className="mr-2 h-5 w-5" />
-              Upload & Process Images
-            </>
-          )}
+          <>
+            <CropIcon className="mr-2 h-5 w-5" />
+            Open Batch Cropper
+          </>
         </Button>
 
         {/* Crop Slider Modal - Renders when showCropSlider is true */}
@@ -334,25 +262,12 @@ export function UploadPanel() {
             <BarcodeCropSlider
               key="crop-slider"
               files={selectedFiles}
-              onComplete={handleCropComplete}
               onCancel={handleCropCancel}
             />
           )}
         </AnimatePresence>
 
         {/* Success message */}
-        <AnimatePresence>
-          {isSuccess && data && (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              className="rounded-lg bg-neon-green/10 border border-neon-green/20 px-4 py-3 text-sm text-neon-green"
-            >
-              ✓ {formatNumber(data.enqueuedCount)} images uploaded and queued for processing
-            </motion.div>
-          )}
-        </AnimatePresence>
       </CardContent>
     </Card>
   );
