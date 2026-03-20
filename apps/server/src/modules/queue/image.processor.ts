@@ -415,22 +415,56 @@ export async function processImage(
 
   // Sanitize barcode for filename
   const sanitized = barcodeValue.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
-  const outputFilename = `${sanitized}${extension}`;
-  let outputPath = path.join(STORAGE_PROCESSED, outputFilename);
+  // IMPORTANT:
+  const uniqueSuffix = path.basename(filePath, extension);
+  const leafFilename = `${sanitized}${extension}`;
 
-  // IMPORTANT: Never create "junk" timestamp suffixes.
-  // If the target barcode filename already exists, we overwrite it.
-  // This prevents names like BARCODE_1234567890.ext.
-  //
-  // Note: If two different images truly share the same barcode, overwriting is inevitable
-  // when the requirement is "barcode only" filenames.
-  if (fs.existsSync(outputPath)) {
-    console.log(`  [Processor] ⚠ Output file already exists for barcode ${sanitized}. Overwriting to avoid suffixes.`);
-    try {
-      await fs.promises.unlink(outputPath);
-    } catch {
-      // ignore
+  // Create output atomically per barcode to avoid races under concurrency.
+  // Rule:
+  // - First image with a barcode -> save as `processed/<barcode><ext>` (no extra prefix/suffix)
+  // - If `processed/<barcode><ext>` already exists -> save as `processed/<barcode>/<uniqueSuffix>/<barcode><ext>`
+  // This means the *leaf* filename is always exactly the barcode, and extra structure appears only on duplicates.
+  const lockRootDir = path.join(STORAGE_PROCESSED, '.locks');
+  const lockDir = path.join(lockRootDir, sanitized);
+  await fs.promises.mkdir(lockRootDir, { recursive: true });
+
+  const acquireLock = async (): Promise<void> => {
+    const start = Date.now();
+    const maxWaitMs = 30000;
+    const waitMs = 50;
+    while (true) {
+      try {
+        await fs.promises.mkdir(lockDir, { recursive: false });
+        return;
+      } catch (err: any) {
+        if (err?.code === 'EEXIST') {
+          if (Date.now() - start > maxWaitMs) {
+            throw new Error(`Timeout acquiring barcode lock for ${sanitized}`);
+          }
+          await new Promise((r) => setTimeout(r, waitMs));
+          continue;
+        }
+        throw err;
+      }
     }
+  };
+
+  let outputPath = path.join(STORAGE_PROCESSED, leafFilename);
+  await acquireLock();
+  try {
+    if (fs.existsSync(outputPath)) {
+      const duplicateDir = path.join(STORAGE_PROCESSED, sanitized, uniqueSuffix);
+      await fs.promises.mkdir(duplicateDir, { recursive: true });
+      outputPath = path.join(duplicateDir, leafFilename);
+    }
+
+    // Fast path: rename instead of copy (no double I/O)
+    console.time('  [Processor] move.processed');
+    await moveFile(filePath, outputPath);
+    console.timeEnd('  [Processor] move.processed');
+  } finally {
+    // Release lock no matter what.
+    await fs.promises.rm(lockDir, { recursive: true, force: true }).catch(() => {});
   }
 
   // ── Step 5: Save original full image with new name ────────────────────────
@@ -441,10 +475,6 @@ export async function processImage(
   console.log(`  [Processor]    Full path: ${outputPath}`);
   
   const copyStartTime = Date.now();
-  // Fast path: rename instead of copy (no double I/O)
-  console.time('  [Processor] move.processed');
-  await moveFile(filePath, outputPath);
-  console.timeEnd('  [Processor] move.processed');
   const copyTime = Date.now() - copyStartTime;
   console.log(`  [Processor] ✓ File moved in ${copyTime}ms`);
 

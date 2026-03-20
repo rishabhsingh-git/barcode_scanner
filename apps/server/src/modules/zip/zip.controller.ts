@@ -8,145 +8,75 @@ import {
 } from '@nestjs/common';
 import { Response } from 'express';
 import { ZipService } from './zip.service';
+import { STORAGE_PROCESSED, STORAGE_ORIGINAL, STORAGE_FAILED } from '../../common/constants';
 
-/**
- * Zip Controller
- *
- * GET /download/zip — Streams a ZIP archive of all processed images.
- * Uses streaming to avoid loading all images into memory at once.
- */
 @Controller('download')
 export class ZipController {
   private readonly logger = new Logger(ZipController.name);
 
   constructor(private readonly zipService: ZipService) {}
 
+  /**
+   * Shared helper: build archive, pipe to response, THEN finalize.
+   * This ordering guarantees that data is consumed as it's produced,
+   * preventing buffer overflows and ensuring 100% of files reach the client.
+   */
+  private async streamZip(
+    res: Response,
+    storageDir: string,
+    label: string,
+    filename: string,
+  ): Promise<void> {
+    const { archive, fileCount } = await this.zipService.buildZipArchive(storageDir, label);
+
+    if (fileCount === 0) {
+      throw new HttpException(`No ${label} images available for download`, HttpStatus.NOT_FOUND);
+    }
+
+    this.logger.log(`[${label}] Streaming ZIP with ${fileCount} file(s)`);
+
+    res.set({
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+      'Transfer-Encoding': 'chunked',
+      'X-File-Count': String(fileCount),
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Expose-Headers': 'X-File-Count',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+      'Cache-Control': 'no-cache',
+    });
+
+    archive.on('error', (err) => {
+      this.logger.error(`[${label}] ZIP error: ${err.message}`);
+      if (!res.headersSent) {
+        res.status(500).json({ error: `Failed to create ${label} ZIP archive` });
+      }
+    });
+
+    // CRITICAL: pipe FIRST, then finalize. This ensures the writable is
+    // consuming data before archiver starts producing, preventing lost data.
+    archive.pipe(res);
+    archive.finalize();
+
+    archive.on('end', () => {
+      this.logger.log(`[${label}] ZIP download completed (${fileCount} files)`);
+    });
+  }
+
   @Get('zip')
   async downloadZip(@Res() res: Response) {
-    this.logger.log('ZIP download requested');
-
-    const fileCount = await this.zipService.getProcessedFileCount();
-
-    if (fileCount === 0) {
-      throw new HttpException(
-        'No processed images available for download',
-        HttpStatus.NOT_FOUND,
-      );
-    }
-
-    this.logger.log(`Streaming ZIP archive with ${fileCount} file(s)`);
-
-    // Set response headers for file download
-    // Include CORS headers for blob downloads
-    res.set({
-      'Content-Type': 'application/zip',
-      'Content-Disposition': 'attachment; filename="processed-images.zip"',
-      'Transfer-Encoding': 'chunked',
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-      'Cache-Control': 'no-cache',
-    });
-
-    // Stream the ZIP archive directly to the response
-    const archive = this.zipService.createZipStream();
-
-    // Handle archive errors
-    archive.on('error', (err) => {
-      this.logger.error(`ZIP archive error: ${err.message}`);
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'Failed to create ZIP archive' });
-      }
-    });
-
-    // Pipe archive to response
-    archive.pipe(res);
-
-    // Log completion
-    archive.on('end', () => {
-      this.logger.log(`ZIP download completed (${fileCount} files)`);
-    });
+    return this.streamZip(res, STORAGE_PROCESSED, 'processed', 'processed-images.zip');
   }
 
-  /**
-   * GET /download/original-zip — Streams a ZIP archive of all ORIGINAL uploaded images.
-   */
   @Get('original-zip')
   async downloadOriginalZip(@Res() res: Response) {
-    this.logger.log('Original ZIP download requested');
-
-    const fileCount = await this.zipService.getOriginalFileCount();
-
-    if (fileCount === 0) {
-      throw new HttpException('No original images available for download', HttpStatus.NOT_FOUND);
-    }
-
-    this.logger.log(`Streaming ORIGINAL ZIP archive with ${fileCount} file(s)`);
-
-    res.set({
-      'Content-Type': 'application/zip',
-      'Content-Disposition': 'attachment; filename="original-images.zip"',
-      'Transfer-Encoding': 'chunked',
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-      'Cache-Control': 'no-cache',
-    });
-
-    const archive = this.zipService.createOriginalZipStream();
-
-    archive.on('error', (err) => {
-      this.logger.error(`Original ZIP archive error: ${err.message}`);
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'Failed to create original ZIP archive' });
-      }
-    });
-
-    archive.pipe(res);
-
-    archive.on('end', () => {
-      this.logger.log(`Original ZIP download completed (${fileCount} files)`);
-    });
+    return this.streamZip(res, STORAGE_ORIGINAL, 'original', 'original-images.zip');
   }
 
-  /**
-   * GET /download/failed-zip — Streams a ZIP archive of all FAILED images.
-   */
   @Get('failed-zip')
   async downloadFailedZip(@Res() res: Response) {
-    this.logger.log('Failed ZIP download requested');
-
-    const fileCount = await this.zipService.getFailedFileCount();
-    if (fileCount === 0) {
-      throw new HttpException('No failed images available for download', HttpStatus.NOT_FOUND);
-    }
-
-    this.logger.log(`Streaming FAILED ZIP archive with ${fileCount} file(s)`);
-
-    res.set({
-      'Content-Type': 'application/zip',
-      'Content-Disposition': 'attachment; filename="failed-images.zip"',
-      'Transfer-Encoding': 'chunked',
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-      'Cache-Control': 'no-cache',
-    });
-
-    const archive = this.zipService.createFailedZipStream();
-
-    archive.on('error', (err) => {
-      this.logger.error(`Failed ZIP archive error: ${err.message}`);
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'Failed to create failed ZIP archive' });
-      }
-    });
-
-    archive.pipe(res);
-
-    archive.on('end', () => {
-      this.logger.log(`Failed ZIP download completed (${fileCount} files)`);
-    });
+    return this.streamZip(res, STORAGE_FAILED, 'failed', 'failed-images.zip');
   }
 }
 

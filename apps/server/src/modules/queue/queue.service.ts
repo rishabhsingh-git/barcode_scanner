@@ -11,6 +11,7 @@ import {
   STORAGE_ORIGINAL,
   STORAGE_PROCESSED,
   STORAGE_FAILED,
+  STORAGE_CROPS,
 } from '../../common/constants';
 import { JobProgress } from '../../common/interfaces/job-progress.interface';
 
@@ -89,6 +90,7 @@ export class QueueService {
 
   /**
    * Reset all progress counters. Called when a new batch upload starts.
+   * Cleans ALL storage directories including crops and temp chunks.
    */
   async resetProgress(): Promise<void> {
     const redisClient = await this.imageQueue.client;
@@ -103,24 +105,32 @@ export class QueueService {
     // Obliterate the queue (remove all jobs)
     await this.imageQueue.obliterate({ force: true });
 
-    // Clean storage directories (remove old files from previous batches)
-    await this.cleanDirectory(STORAGE_ORIGINAL);
-    await this.cleanDirectory(STORAGE_PROCESSED);
-    await this.cleanDirectory(STORAGE_FAILED);
+    // Clean ALL storage directories (including crops and temp chunks)
+    await Promise.all([
+      this.cleanDirectory(STORAGE_ORIGINAL),
+      this.cleanDirectory(STORAGE_PROCESSED),
+      this.cleanDirectory(STORAGE_FAILED),
+      this.cleanDirectory(STORAGE_CROPS),
+    ]);
 
-    this.logger.log('Queue, progress counters, and storage reset');
+    this.logger.log('Queue, progress counters, and all storage directories reset');
   }
 
   /**
-   * Remove all files from a directory without deleting the directory itself.
+   * Remove all files AND subdirectories from a directory without deleting the directory itself.
    */
   private async cleanDirectory(dirPath: string): Promise<void> {
     try {
-      const files = await fs.promises.readdir(dirPath);
+      const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
       await Promise.all(
-        files.map((file) =>
-          fs.promises.unlink(path.join(dirPath, file)).catch(() => {}),
-        ),
+        entries.map(async (entry) => {
+          const fullPath = path.join(dirPath, entry.name);
+          if (entry.isDirectory()) {
+            await fs.promises.rm(fullPath, { recursive: true, force: true }).catch(() => {});
+          } else {
+            await fs.promises.unlink(fullPath).catch(() => {});
+          }
+        }),
       );
     } catch {
       // Directory may not exist yet — that's fine
